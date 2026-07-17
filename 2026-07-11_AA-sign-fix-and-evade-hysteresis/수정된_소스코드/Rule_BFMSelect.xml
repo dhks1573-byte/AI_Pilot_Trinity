@@ -1,0 +1,127 @@
+<root main_tree_to_execute = "MainTree">
+
+  <BehaviorTree ID="MainTree">
+    <Sequence>
+
+      <!-- 인지 단계: 타겟 선정 및 기하 정보 업데이트 + BFM 분류 -->
+      <Sequence>
+        <SelectTarget name="SelectTarget" BB="{BB}"/>
+        <DirectionVectorUpdate name="DirectionVectorUpdate" BB="{BB}"/>
+        <DistanceUpdate name="DistanceUpdateService" BB="{BB}"/>
+        <CheckSight name="CheckSight" BB="{BB}"/>
+        <AngleOffUpdate name="AngleOffUpdate" BB="{BB}"/>
+        <AspectAngleUpdate name="AspectAngleUpdate" BB="{BB}"/>
+        <BFMClassifier name="BFMClassifier" BB="{BB}"/>
+
+        <ReactiveFallback>
+
+          <!-- 0. 절대 안전장치(BFM 분류와 무관): 최저 고도 3000m 미만 즉시 상승 -->
+          <Sequence>
+            <DECO_AltitudeCheck name="AltCheck" MinAlt="3000" BB="{BB}"/>
+            <Task_ClimbOut name="ClimbOut" BB="{BB}"/>
+          </Sequence>
+
+          <!-- 근접 후방 위협 즉시 대응: BFM 분류와 무관하게 항상 기회를 줌 (Rule_Trinity와 동일).
+               Task_BreakAndReverse는 자체 내부 게이트(ATA>140, 900m 이내)만으로 발동 여부를
+               판단하는 태스크라서, 이걸 내 분류기의 DBFM 게이트 뒤에 가뒀더니 baseline이라면
+               발동했을 상황에서도 발동을 못 해 회복 기동을 놓치는 회귀가 발생함 -> 원래대로
+               무조건 최우선 시도로 되돌림. Task_Evade도 마찬가지로 baseline의 원래 데코레이터
+               (거리<3000 + 위협각>150)만 사용, 내 BFM 분류에 종속시키지 않음.
+               (2026-07-09: 여기에 AA<60 가드를 추가해 "이미 좋은 위치인데 Evade로
+               도망가는" 케이스를 막아보는 시도를 했으나, 단일 시나리오에서 reward
+               -173->-180 악화 + 최초로 ownship 피격, 8시드 배치에서도 패배 0->1건
+               재발로 확인되어 즉시 원복함. 결론: 이 게이트는 MyATA>150만으로도
+               "지금은 최소한 방어라도 해야 한다"는 유효한 신호이며, AA가 좋다고
+               무조건 공격을 강행하면 오히려 더 나쁨 -- BFMClassifier 우선순위
+               재정렬([[session-2026-07-09-aip-dogfight-ata-vs-aa]])과 달리 이 개별
+               Evade 게이트는 건드리지 않는 게 맞음.
+               (2026-07-12 재시도, 다시 원복됨: 2026-07-11 AA 부호반전 버그 수정판
+               위에서 같은 가드(AspectCheck_EvadeGuard, AA>60일때만 Evade)를 재검증.
+               20시드 배치에서 패배 재발은 없었으나(0/0/20 유지) reward가 -88.54->
+               -105.78로 뚜렷하게 악화해 순이익 없음으로 판단, 원복. 결론: AA 버그와
+               무관하게 이 게이트는 AA가 아니라 MyATA>150 자체로 판단해야 맞다는
+               07-09 결론이 재확인됨. [[session-2026-07-12]] 참고.) -->
+          <Task_BreakAndReverse name="BreakAndReverse" BB="{BB}"/>
+
+          <Sequence>
+            <DECO_DistanceCheck name="TailThreat_RangeGate" UpDown="Less" Distance="3000" BB="{BB}"/>
+            <DECO_TailThreatCheck name="TailThreat" ThreatAngle="150" BB="{BB}"/>
+            <Task_Evade name="Evade" BB="{BB}"/>
+          </Sequence>
+
+          <!-- 루프 공격: BFM 분류와 무관하게 항상 기회를 줌 (Rule_Trinity와 동일 우선순위).
+               자체 내부 게이트(거리 800~1800m, 고도 3000m+, 전방 70도 이내)가 이미 충분히
+               좁은 조건이라 BFM 분류에 종속시키지 않음 -> BFM 게이트에 가둬서 기회를
+               거의 못 받았던 첫 시도의 실패를 수정 -->
+          <Task_LoopAttack name="LoopAttack" BB="{BB}"/>
+
+          <!-- DBFM: 근접 위협은 아직 아니지만(BreakAndReverse/Evade 게이트 밖) 에너지
+               열세이거나 원거리 후방위협인 상황. Controller_CY의 능동강하 불가 제약을
+               절대 건드리지 않도록, 수평 이탈(상대 반대방향) + 상승(WorldUp)만 사용하는
+               Task_Extend로 분리기동하며 에너지를 회복한다(2026-07-07 신설). -->
+          <Sequence>
+            <DECO_BFMCheck name="IsDBFM" CheckBFM="DBFM" BB="{BB}"/>
+            <Task_Extend name="Extend" BB="{BB}"/>
+          </Sequence>
+
+          <!-- HABFM: 조준각도 애매하고 에너지도 비슷한 중립/머지 상황.
+               (2026-07-05: Task_Merge(현재위치 직접조준)로 시도해봤으나 Evade 발동이
+               114회로 급증하며 무교전 발산(reward -155)으로 대실패 -> GetTail로 원복.
+               Task_Merge.h/.cpp 파일은 삭제하지 않고 남겨둠, 팩토리 등록도 유지.
+               이 근접 재포지셔닝 영역은 GetTail 상수를 바꾼 시도까지 포함해 이번
+               세션에서만 벌써 2번 연속 동일한 "무교전 발산" 패턴으로 실패함 ->
+               건드릴 때마다 왜 이렇게 되는지 원인부터 규명 필요, 단순 대입/스왑으로는
+               해결 안 됨) -->
+          <Sequence>
+            <DECO_BFMCheck name="IsHABFM" CheckBFM="HABFM" BB="{BB}"/>
+            <Task_GetTail name="GetTail_Neutral" BB="{BB}"/>
+          </Sequence>
+
+          <!-- OBFM: 내가 타겟을 잘 조준 중이거나 에너지 우세 -> 공격
+               (Rule_Trinity의 기 검증된 세부 우선순위를 그대로 재사용) -->
+          <Sequence>
+            <DECO_BFMCheck name="IsOBFM" CheckBFM="OBFM" BB="{BB}"/>
+            <ReactiveFallback>
+
+              <Sequence>
+                <DECO_AspectAngleCheck name="AspectCheck_NotBehind" UpDown="Greater" InputAA="60" BB="{BB}"/>
+                <Task_GetTail name="GetTail" BB="{BB}"/>
+              </Sequence>
+
+              <Sequence>
+                <DECO_DistanceCheck name="DistanceCheck_Approach" UpDown="Greater" Distance="914" BB="{BB}"/>
+                <Task_Lead name="Task_Lead" BB="{BB}"/>
+              </Sequence>
+
+              <!-- WEZ 내 정밀 조준: Task_PurePN(LOS-rate 기반 PN 보정)을 시도했으나
+                   20시드 배치에서 패배건수 동일(3/20), 평균 reward는 오히려 악화
+                   (-134.33 -> -149.81)로 확인되어 원복함(2026-07-07). Task_PurePN.h/.cpp,
+                   팩토리 등록은 향후 재시도를 위해 남겨둠(Task_Merge와 동일 정책).
+                   (2026-07-12 재검토, 다시 원복됨: 2026-07-11 AA 부호반전 버그 수정판
+                   위에서 재검증했으나 -92.24->-106.01로 여전히 악화(패배 재발은
+                   없음). AA 버그와 무관하게 07-07의 원래 결론이 유효함이 재확인됨.
+                   [[session-2026-07-12-evasion-root-cause]] 참고.) -->
+              <Sequence>
+                <DECO_DistanceCheck name="DistanceCheck_WEZ" UpDown="Less" Distance="914" BB="{BB}"/>
+                <Task_Pure name="Task_Pure" BB="{BB}"/>
+              </Sequence>
+
+            </ReactiveFallback>
+          </Sequence>
+
+          <!-- 기본값(첫 틱 등, BFM==NONE인 극히 드문 경우 대비): OBFM과 동일 취급 -->
+          <Sequence>
+            <DECO_AspectAngleCheck name="AspectCheck_Default" UpDown="Greater" InputAA="60" BB="{BB}"/>
+            <Task_GetTail name="GetTail_Default" BB="{BB}"/>
+          </Sequence>
+
+          <Task_Lead name="Task_Lead_Default" BB="{BB}"/>
+
+        </ReactiveFallback>
+
+      </Sequence>
+
+    </Sequence>
+  </BehaviorTree>
+
+</root>
